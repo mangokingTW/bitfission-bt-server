@@ -80,7 +80,6 @@ struct raw_storage : lt::storage_interface {
 
 	bool has_any_file(lt::storage_error& ec) 
 	{
-		printf("fucckkkkkkkkk any file\n");
 		return true;
 	}
 
@@ -145,7 +144,6 @@ struct raw_storage : lt::storage_interface {
 	// Not need
 	int writev(lt::file::iovec_t const* bufs, int num_bufs, int piece, int offset, int flags, lt::storage_error& ec)
 	{
-		printf("fucckkkkkkkkk\n");
 		return 0;
 	}
 
@@ -157,7 +155,6 @@ struct raw_storage : lt::storage_interface {
 					, std::vector<std::string> const* links
 					, lt::storage_error& error) 
 	{
-		printf("fucckkkkkkkkk\n");
 		return false;
 	}
 	void write_resume_data(lt::entry& rd, lt::storage_error& ec) const { return ; }
