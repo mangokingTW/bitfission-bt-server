@@ -242,7 +242,7 @@ int main(int argc, char **argv){
 	set.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6666");
 	atp.ti = boost::make_shared<lt::torrent_info>(torrent, boost::ref(ec), 0);
 	atp.storage = raw_storage_constructor;
-	//atp.flags |= atp.flag_seed_mode;
+	atp.flags = atp.flag_upload_mode | atp.flag_seed_mode;
 	
 	
 	unsigned long last_progess = 0, progress = 0;
