@@ -100,15 +100,6 @@ struct raw_storage : lt::storage_interface {
 		this->fd = open(target_partition.c_str(), O_RDONLY | O_NONBLOCK | O_LARGEFILE);
 		if( this->fd < 0 ) abort();
 		
-		// Get file name from offset
-		index = m_files.file_index_at_offset( piece * std::uint64_t(m_files.piece_length()) + offset);
-		memcpy( filename, m_files.file_name_ptr(index), m_files.file_name_len(index));
-		filename[m_files.file_name_len(index)] = 0;
-		sscanf(filename,"%llx", &device_offset);
-		// Caculate total piece size of previous files
-		for( i = 0 ; i < index; i++ )
-			piece_sum += m_files.file_size(i);
-		
 		// Caculate the length of all bufs
 		for( i = 0 ; i < num_bufs ; i ++){
 			data_len += bufs[i].iov_len;
@@ -117,18 +108,6 @@ struct raw_storage : lt::storage_interface {
 		
 		fd_offset = image_head_size + offset + piece * std::uint64_t(m_files.piece_length());
 		ret = pread(this->fd, data_buf, data_len, fd_offset);
-		/*
-		printf("fileoffset: %llx\n",fd_offset);
-		printf("deviceoffset: %llx\n",device_offset);
-		printf("pieceoffset: %llx\n",fd_offset - image_head_size);
-		printf("piece: %llx\n",piece);
-		printf("ret: %llx\n",ret);
-		printf("data: ");
-		for( int i = 0 ; i < SHA_DIGEST_LENGTH ; i++){
-			printf("%02x",data_buf[i]);
-		}
-		printf("\n======================\n\n");
-		*/
 		// Copy data_buf to bufs
 		data_ptr = data_buf;
 		for( i = 0 ; i < num_bufs ; i ++){
