@@ -6,7 +6,6 @@
 #include <map>
 #include <thread>
 #include <chrono>
-#include <openssl/sha.h>
 
 #include <libtorrent/session.hpp>
 #include <libtorrent/add_torrent_params.hpp>
@@ -22,18 +21,16 @@
 #include <libtorrent/peer_info.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 
-#include "partclone.h"
-
 typedef struct{
+	long int header;
 	char* source;
 	char* target;
+	bool raw;
 	char* torrent;
 } cmd_arg;
 
-cmd_opt opt;
 unsigned long long rescue_write_size;
-unsigned long long image_head_size;
-file_system_info fs_info;
+unsigned long long image_head_size = 0;
 std::map<unsigned long long, unsigned long long> block_map;
 
 
@@ -41,16 +38,25 @@ void parse_arg(int argc, char **argv, cmd_arg *arg){
 	static struct option long_options[] =
 	{
 		{"source", required_argument, 0, 's'},
-		{"torrent", required_argument, 0, 't'}
+		{"torrent", required_argument, 0, 't'},
+		{"header", required_argument, 0, 'h'},
+		{"raw", no_argument, 0, 'r'},
+		{0,0,0,0}
 	};
 	int c;
-	while((c = getopt_long(argc, argv, "t:s:", long_options, NULL)) != -1 ){
+	while((c = getopt_long(argc, argv, "h:t:s:r", long_options, NULL)) != -1 ){
 		switch(c){
+			case 'h':
+				sscanf(optarg, "%ld", &(arg->header));
+				break;
 			case 's':
 				arg->source = optarg;
 				break;
 			case 't':
 				arg->torrent = optarg;
+				break;
+			case 'r':
+				arg->raw = true;
 				break;
 			default:
 				exit(-1);
@@ -67,19 +73,19 @@ struct raw_storage : lt::storage_interface {
 	// Open disk fd
 	void initialize(lt::storage_error& se)
 	{
-		/*this->fd = open(target_partition.c_str(), O_RDONLY | O_LARGEFILE );
+		this->fd = open(target_partition.c_str(), O_RDONLY | O_LARGEFILE | O_NONBLOCK);
 		if(this->fd <= 0){
 			// Failed handle
 			std::cerr << "Failed to open " << target_partition << std::endl;
 
 			// TODO exit
 		}
-		*/
 		return;
 	}
 
 	bool has_any_file(lt::storage_error& ec) 
 	{
+		std::cerr << "fd: " << this->fd << std::endl;
 		return true;
 	}
 
@@ -97,9 +103,6 @@ struct raw_storage : lt::storage_interface {
 		char *data_buf, *data_ptr = NULL;
 		char filename[33]; // Should be the max length of file name
 		
-		this->fd = open(target_partition.c_str(), O_RDONLY | O_NONBLOCK | O_LARGEFILE);
-		if( this->fd < 0 ) abort();
-		
 		// Caculate the length of all bufs
 		for( i = 0 ; i < num_bufs ; i ++){
 			data_len += bufs[i].iov_len;
@@ -114,9 +117,7 @@ struct raw_storage : lt::storage_interface {
 			memcpy(bufs[i].iov_base, data_ptr, bufs[i].iov_len);
 			data_ptr += bufs[i].iov_len;
 		}
-
 		free(data_buf);
-		close(this->fd);
 		return ret;
 	}
 
@@ -151,58 +152,22 @@ struct raw_storage : lt::storage_interface {
 
 lt::storage_interface* raw_storage_constructor(lt::storage_params const& params)
 {
-	return new raw_storage(*params.files, params.path);
+		lt::storage_interface* tmp =  new raw_storage(*params.files, params.path);
+		lt::storage_error se;
+		tmp->initialize(se);
+		return tmp;
 }
 
 int main(int argc, char **argv){
-	//file_system_info fs_info;
-	image_options img_opt;
-	image_head_v2 img_head;
 	unsigned long *bitmap = NULL;
 	cmd_arg arg;
 	int dfr;
-	//long long int image_head_size = 0;
-	//std::map<unsigned long long, unsigned long long> block_map;
 
 	parse_arg(argc, argv, &arg);
 
-	init_fs_info(&fs_info);
-	if((dfr = open(arg.source, O_RDONLY | O_LARGEFILE)) == -1){
-		perror("unable to open source");
-		exit(-1);
+	if(!arg.raw){
+		image_head_size = arg.header;
 	}
-	load_image_desc(&dfr, &opt, &img_head, &fs_info, &img_opt);
-	printf("Total Blocks: %lld\n",fs_info.totalblock);
-	bitmap = pc_alloc_bitmap(fs_info.totalblock);
-	load_image_bitmap(&dfr, opt, fs_info, img_opt, bitmap);
-
-	unsigned long long counter = 0;
-	unsigned long long cur_block = 0;
-	unsigned long long save_block = 0;
-	unsigned long long cur_bitmap = 0;
-	unsigned long long save_bitmap = 0;
-	do {
-		for( ; cur_block < fs_info.totalblock &&
-			!pc_test_bit(cur_block, bitmap, fs_info.totalblock);
-			cur_block++);
-		if( cur_block == fs_info.totalblock ) break;
-		save_block = cur_block;
-		save_bitmap = cur_bitmap;
-		for( ; cur_block < fs_info.totalblock &&
-			pc_test_bit(cur_block, bitmap, fs_info.totalblock);
-			cur_block++, cur_bitmap++);
-		block_map[save_block*fs_info.block_size] = save_bitmap*fs_info.block_size;
-		printf("disk block(%llx) is on bitmap(%llx) and len(%llx)\n", save_block*fs_info.block_size, save_bitmap,(cur_bitmap-save_bitmap)*fs_info.block_size);
-	} while ( cur_block < fs_info.totalblock );
-	printf("Used Blocks: %lld\n", cur_bitmap);
-	printf("Size of image header: %lld\n", sizeof(image_head_v2));
-	image_head_size = lseek(dfr, 0, SEEK_CUR);
-	printf("ftell: %lld\n", image_head_size);
-	printf("Block size: %lld\n", fs_info.block_size);
-	printf("Total size: %lld\n",image_head_size+cur_bitmap*fs_info.block_size);
-	printf("File size: %lld\n",lseek(dfr, 0, SEEK_END));
-	close(dfr);
-	
 
 	lt::add_torrent_params atp;
 	lt::session ses;
@@ -216,26 +181,71 @@ int main(int argc, char **argv){
 	int max_contact_tracker_times = 30; // Max error times for scrape tracker
 
 
-	atp.save_path = arg.source;
 	set.set_bool(lt::settings_pack::enable_dht, false);
 	set.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6666");
+	ses.apply_settings(set);
 	atp.ti = boost::make_shared<lt::torrent_info>(torrent, boost::ref(ec), 0);
 	atp.storage = raw_storage_constructor;
-	atp.flags = atp.flag_upload_mode | atp.flag_seed_mode;
+	atp.save_path = arg.source;
+	atp.flags |= atp.flag_seed_mode;
 	
 	
 	unsigned long last_progess = 0, progress = 0;
 	lt::torrent_status status;
 
-	//lt::high_performance_seed(set);
+	lt::torrent_handle handle = ses.add_torrent(atp);
+	handle.set_max_uploads(max_upload_ezio);
+	handle.set_max_connections(max_connection_ezio);
+
+	for(;;){
+		std::vector<lt::alert*> alerts;
+		ses.pop_alerts(&alerts);
+
+		status = handle.status();
+		// progress
+		last_progess = progress;
+		progress = status.progress * 100;
+		//show_progress += progress - last_progess;
+		std::cout << std::fixed << "\r"
+			<< "[P: " << progress << "%] "
+			<< "[D: " << std::setprecision(2) << (float)status.download_payload_rate / 1024 / 1024 /1024 * 60 << " GB/min] "
+			<< "[DT: " << (int)status.active_time  << " secs] "
+			<< "[U: " << std::setprecision(2) << (float)status.upload_payload_rate / 1024 / 1024 /1024 *60 << " GB/min] "
+			<< "[UT: " << (int)status.seeding_time  << " secs] "
+			<< std::flush;
+
+		for (lt::alert const* a : alerts) {
+			// std::cout << a->message() << std::endl;
+			// if we receive the finished alert or an error, we're done
+			if (lt::alert_cast<lt::torrent_finished_alert>(a)) {
+				goto done;
+			}
+			if (status.is_finished) {
+				goto done;
+			}
+			if (lt::alert_cast<lt::torrent_error_alert>(a)) {
+				std::cerr << "Error" << std::endl;
+				return 1;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+	}	
+
+	done:
+	std::cout << std::endl;
+
+
+	// Start high performance seed
+	lt::high_performance_seed(set);
 	ses.apply_settings(set);
 	std::cout << "Start high-performance seeding" << std::endl;
-	lt::torrent_handle handle = ses.add_torrent(atp);
 
 	// seed until idle (secs)
 	int timeout = timeout_ezio * 60;
 
 	// seed until seed rate
+	boost::int64_t seeding_rate_limit = seed_limit_ezio;
+	boost::int64_t total_size = handle.torrent_file()->total_size();
 
 	int fail_contact_tracker = 0;
 	for (;;) {
@@ -243,20 +253,28 @@ int main(int argc, char **argv){
 		int utime = status.time_since_upload;
 		int dtime = status.time_since_download;
 		boost::int64_t total_payload_upload = status.total_payload_upload;
+		// ses.set_alert_mask(lt::alert::tracker_notification | lt::alert::error_notification);
 		std::vector<lt::alert*> alerts;
 		ses.pop_alerts(&alerts);
-
+		progress = status.progress * 100;
 		std::cout << std::fixed << "\n\r"
+			<< "[P: " << progress << "%] "
+			/*
+			<< "[D: " << std::setprecision(2) << (float)status.download_payload_rate / 1024 / 1024 /1024 * 60 << " GB/min] "
+			<< "[T: " << (int)status.active_time  << " secs] "
+			*/
 			<< "[U: " << std::setprecision(2) << (float)status.upload_payload_rate / 1024 / 1024 /1024 * 60 << " GB/min] "
 			<< "[T: " << (int)status.seeding_time  << " secs] "
 			<< status.state
-			<< status.error
 			<< std::flush;
 
 		if(utime == -1 && timeout < dtime){
 			break;
 		}
 		else if(timeout < utime){
+			break;
+		}
+		else if(seeding_rate_limit < (total_payload_upload / total_size)){
 			break;
 		}
 
@@ -274,6 +292,8 @@ int main(int argc, char **argv){
 
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
+	std::cout << "\nDone, shutting down" << std::endl;
 
+	
 	return 0;
 }
