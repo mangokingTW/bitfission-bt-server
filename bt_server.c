@@ -7,6 +7,9 @@
 #include <thread>
 #include <chrono>
 
+#include <sys/sysinfo.h>
+#define RAM_2G (2UL * 1024 * 1024 * 1024)
+
 #include <libtorrent/session.hpp>
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/torrent_handle.hpp>
@@ -21,12 +24,17 @@
 #include <libtorrent/peer_info.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 
+namespace lt = libtorrent;
+
 typedef struct{
 	long int offset;
 	char* source;
 	char* target;
 	FILE* lfile;
 	char* torrent;
+	int seed_algo;
+	int max_connection;
+	int max_upload;
 } cmd_arg;
 
 unsigned long long rescue_write_size;
@@ -38,6 +46,9 @@ std::map<unsigned long long, unsigned long long> block_map;
 void parse_arg(int argc, char **argv, cmd_arg *arg){
 	static struct option long_options[] =
 	{
+		{"seed_choking_algorithm", required_argument, 0, 'a'},
+		{"max_connection", required_argument, 0, 'c'},
+		{"max_upload", required_argument, 0, 'u'},
 		{"source", required_argument, 0, 's'},
 		{"torrent", required_argument, 0, 't'},
 		{"offset", required_argument, 0, 'o'},
@@ -45,8 +56,26 @@ void parse_arg(int argc, char **argv, cmd_arg *arg){
 		{0,0,0,0}
 	};
 	int c;
-	while((c = getopt_long(argc, argv, "l:o:t:s:", long_options, NULL)) != -1 ){
+	while((c = getopt_long(argc, argv, "a:c:l:o:s:t:u:", long_options, NULL)) != -1 ){
 		switch(c){
+			case 'a':
+				switch(atoi(optarg)){
+					case 1:
+						arg->seed_algo = lt::settings_pack::round_robin;
+						break;
+					case 2:
+						arg->seed_algo = lt::settings_pack::fastest_upload;
+						break;
+					case 3:
+						arg->seed_algo = lt::settings_pack::anti_leech;
+						break;
+					default:
+						break;
+				}
+				break;
+			case 'c':
+				arg->max_connection = atoi(optarg);
+				break;
 			case 'l':
 				arg->lfile = fopen(optarg, "r");
 				break;
@@ -59,21 +88,17 @@ void parse_arg(int argc, char **argv, cmd_arg *arg){
 			case 't':
 				arg->torrent = optarg;
 				break;
+			case 'u':
+				arg->max_upload = atoi(optarg);
+				break;
 			default:
 				exit(-1);
 		}
 	}
 }
 
-
-namespace lt = libtorrent;
-
 struct raw_storage : lt::storage_interface {
 	raw_storage(lt::file_storage const& fs, const std::string tp) : m_files(fs), target_image(tp) {
-	}
-	// Open disk fd
-	void initialize(lt::storage_error& se)
-	{
 		this->fd = open(target_image.c_str(), O_RDONLY | O_LARGEFILE | O_NONBLOCK);
 		if(this->fd <= 0){
 			// Failed handle
@@ -82,7 +107,10 @@ struct raw_storage : lt::storage_interface {
 			// TODO exit
 		}
 		image_head_size = offset_map[target_image];
-		return;
+	}
+
+	void initialize(lt::storage_error& se)
+	{
 	}
 
 	bool has_any_file(lt::storage_error& ec) 
@@ -171,20 +199,41 @@ int main(int argc, char **argv){
 	lt::session ses;
 	lt::error_code ec;
 	lt::settings_pack set;
-	int timeout_ezio = 15; // Default timeout (min)
-	int seed_limit_ezio = 3; // Default seeding ratio limit
-	int max_upload_ezio = 4;
-	int max_connection_ezio = max_upload_ezio + 2;
+	//int max_upload_ezio = 2;
+	//int max_connection_ezio = 4;
 	int max_contact_tracker_times = 30; // Max error times for scrape tracker
 
 
 	set.set_bool(lt::settings_pack::enable_dht, false);
 	set.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6666");
+	set.set_int(lt::settings_pack::alert_mask, lt::alert::error_notification | lt::alert::storage_notification | lt::alert::status_notification | lt::alert::progress_notification | lt::alert::performance_warning | lt::alert::debug_notification );
+	struct sysinfo info;
+	if(sysinfo(&info) == 0) {
+		unsigned long totalram = info.totalram * info.mem_unit;
+		if(totalram > RAM_2G) {
+			// unit: blocks per 16KiB
+			int size = (int)(totalram / 16 / 1024 / 2);
+			std::cout << "Use read cache: " << size << std::endl;
+			set.set_bool(lt::settings_pack::use_read_cache, true);
+			set.set_int(lt::settings_pack::suggest_mode, lt::settings_pack::suggest_read_cache);
+			set.set_int(lt::settings_pack::cache_size, size);
+			set.set_int(lt::settings_pack::cache_expiry, 1800);
+			set.set_int(lt::settings_pack::send_buffer_watermark, 128 * 1024 * 1024);
+			set.set_int(lt::settings_pack::send_buffer_watermark_factor, 150);
+			set.set_int(lt::settings_pack::send_buffer_low_watermark, 40 * 1024 * 1024);
+		}
+	}
 	ses.apply_settings(set);
 	std::list<lt::torrent_handle> handle_list;
 
 	arg.lfile = NULL;
+	arg.seed_algo = lt::settings_pack::round_robin;
+	arg.max_connection = 2;
+	arg.max_upload = 2;
 	parse_arg(argc, argv, &arg);
+
+	set.set_int(lt::settings_pack::seed_choking_algorithm, arg.seed_algo);
+
 	if( arg.lfile == NULL ) {
 		std::string torrent = arg.torrent;
 		offset_map[torrent] = arg.offset;
@@ -193,6 +242,8 @@ int main(int argc, char **argv){
 		atp.save_path = arg.source;
 		atp.flags |= atp.flag_seed_mode;
 		lt::torrent_handle ahandle = ses.add_torrent(atp);
+		ahandle.set_max_uploads(arg.max_upload);
+		ahandle.set_max_connections(arg.max_connection);
 		handle_list.push_back(ahandle);
 	}
 	else {
@@ -207,8 +258,8 @@ int main(int argc, char **argv){
 			atp.save_path = asource;
 			atp.flags |= atp.flag_seed_mode;
 			lt::torrent_handle ahandle = ses.add_torrent(atp);
-			ahandle.set_max_uploads(max_upload_ezio);
-			ahandle.set_max_connections(max_connection_ezio);
+			ahandle.set_max_uploads(arg.max_upload);
+			ahandle.set_max_connections(arg.max_connection);
 			handle_list.push_back(ahandle);
 		}
 	}
@@ -224,17 +275,20 @@ int main(int argc, char **argv){
 			unsigned long progress = 0;
 			int utime = status.time_since_upload;
 			int dtime = status.time_since_download;
-			// ses.set_alert_mask(lt::alert::tracker_notification | lt::alert::error_notification);
 			std::vector<lt::alert*> alerts;
 			ses.pop_alerts(&alerts);
+			handle.force_reannounce();
 			progress = status.progress * 100;
+			for( lt::alert* alert : alerts ){
+					std::cout << "Alert : " << alert->what() << " " << alert->message() << std::endl;
+			}
 			std::cout << std::fixed
+				<< "Bitfission BT v0.11: "
 				<< status.save_path << " "
 				<< "[P: " << progress << "%] "
-				//<< "[D: " << std::setprecision(2) << (float)status.download_payload_rate / 1024 / 1024 /1024 * 60 << " GB/min] "
-				//<< "[T: " << (int)status.active_time  << " secs] "
 				<< "[U: " << std::setprecision(2) << (float)status.upload_payload_rate / 1024 / 1024 /1024 * 60 << " GB/min] "
 				<< "[T: " << (int)status.seeding_time  << " secs] "
+				<< "[Num: " << status.num_pieces << " ] "
 				<< status.state
 				<< std::endl
 				<< std::flush;
