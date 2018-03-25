@@ -236,7 +236,7 @@ int main(int argc, char **argv){
 
 	if( arg.lfile == NULL ) {
 		std::string torrent = arg.torrent;
-		offset_map[torrent] = arg.offset;
+		offset_map[std::string(arg.source)] = arg.offset;
 		atp.ti = boost::make_shared<lt::torrent_info>(torrent, boost::ref(ec), 0);
 		atp.storage = raw_storage_constructor;
 		atp.save_path = arg.source;
